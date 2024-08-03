@@ -10,10 +10,10 @@ fileTransferCondition = threading.Condition()
 class Group:
 	def __init__(self,admin,client):
 		self.admin = admin
-		self.clients = {}
-		self.offlineMessages = {}
+		# self.clients = {}
+		# self.offlineMessages = {}
 		self.allMembers = set()
-		self.onlineMembers = set()
+		# self.onlineMembers = set()
 		self.joinRequests = set()
 		self.waitClients = {}
 
@@ -51,7 +51,7 @@ def pyconChat(client, username, groupname):
 			client.recv(1024).decode("utf-8")
 			if username == groups[groupname].admin:
 				client.send(b"/proceed")
-				usernameToApprove = client.recv(1024).decode("utf-8")
+				usernameToApprove = client.recv(1024).decode("utf-8");
 				if usernameToApprove in groups[groupname].joinRequests:
 					groups[groupname].joinRequests.remove(usernameToApprove)
 					groups[groupname].allMembers.add(usernameToApprove)
@@ -196,4 +196,4 @@ def main():
 		threading.Thread(target=handshake, args=(client,)).start()
 
 if __name__ == "__main__":
-	main()+
+	main()

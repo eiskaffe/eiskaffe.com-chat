@@ -125,7 +125,7 @@ def serverListen(serverSocket):
 			f.close()
 			print("Received file saved as",filename)
 		else:
-			print(msg)
+			print(msg) # ha egyik parancs sem, akkor írd ki az üzenetet.
 
 def userInput(serverSocket):
 	while state["alive"]:

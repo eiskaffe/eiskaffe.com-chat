@@ -1,18 +1,15 @@
 import socket
 import threading
-import pickle
-import os
-import sys
 from base64 import b64encode, b64decode
 from tinydb import TinyDB, where
 import hashlib
-from enum import Enum
 from Crypto.Cipher import PKCS1_OAEP, AES
 from Crypto.PublicKey import RSA
 from Crypto import Random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 
-groups = {}
+rooms = {}
 fileTransferCondition = threading.Condition()
 HANDSHAKE_CONFIRM = [
     "Rammstein - Du Riechst So Gut",
@@ -22,7 +19,19 @@ HANDSHAKE_CONFIRM = [
     "Stahlmann - Adrenalin"
 ]
 
-db = TinyDB("./db/db.json")
+# Database
+
+DEFAULT_ROOM_NAME = "general"
+USERS_DATABASE_NAME = "users"
+ROOMS_DATABASE_NAME = "room_meta"
+
+api_db = TinyDB("./db/db.json")
+history_db = TinyDB("./db/history.json")
+history_db.default_table_name = DEFAULT_ROOM_NAME
+chat_meta_db = TinyDB("./db/chat.json")
+users_db = chat_meta_db.table(USERS_DATABASE_NAME)
+roommeta_db = chat_meta_db.table(ROOMS_DATABASE_NAME)
+rooms = {}
 with open("./db/.pepper", "r", encoding="utf-8") as p:
     PEPPER = p.readline().strip()
 with open("./db/.privatekey", "rb") as f:
@@ -30,14 +39,10 @@ with open("./db/.privatekey", "rb") as f:
 with open("./db/.publickey", "rb") as f:
     PUBLIC_KEY = RSA.import_key(f.read())
 
-def get_user(username) -> dict:
-    """Returns the user with the username, raises error when multiple or none are present."""
-    x = db.search(where("username") == username)
-    if len(x) > 1 or len(x) == 0: return False
-    return x[0]
+# Encryption
 
 def rsa_encrypt_to_user(username: str, msg: bytes) -> bytes:
-    user = get_user(username)
+    user = api_db.search(where("username") == username)[0]
     pub = AESCipher((PEPPER+user["salt"]).encode()).decrypt(user["pub"])
     rsa_public_key = PKCS1_OAEP.new(RSA.importKey(pub))
     a = rsa_public_key.encrypt(msg)
@@ -68,164 +73,80 @@ class AESCipher(object):
     def _unpad(s):
         return s[:-ord(s[len(s)-1:])]
 
-class Group:
-    def __init__(self,admin,client):
-        self.admin = admin
-        self.clients = {}
-        self.offlineMessages = {}
-        self.allMembers = set()
-        self.onlineMembers = set()
-        self.joinRequests = set()
-        self.waitClients = {}
-
-        self.clients[admin] = client
-        self.allMembers.add(admin)
-        self.onlineMembers.add(admin)
-
-    def disconnect(self,username):
-        self.onlineMembers.remove(username)
-        del self.clients[username]
-    
-    def connect(self,username,client):
-        self.onlineMembers.add(username)
-        self.clients[username] = client
-
-    def sendMessage(self,message,username):
-        for member in self.onlineMembers:
-            if member != username:
-                self.clients[member].send(bytes(username + ": " + message,"utf-8"))
-
 @dataclass
 class User:
     username: str
-    aes_key: bytes
+    aes: AESCipher
+    client: socket
+    room: str = DEFAULT_ROOM_NAME
+    
+    def send(self, raw: str | bytes) -> None:
+        """ Send data to the user """
+        self.client.send(self.aes.encrypt(raw))
+        
+    def recieve(self, size: int = 1024) -> str:
+        """ Receive data from the user """
+        return self.aes.decrypt(self.client.recv(size))
 
-def pyconChat(client, username, groupname):
+@dataclass
+class Room:
+    name: str
+    owner: str
+    admins: set[str]
+    all_users: set[str]
+    online_users: dict[str,User] = field(init=False, default_factory=dict)
+    history: TinyDB = field(init=False, repr=False)
+    
+    def __post_init__(self):
+        self.history = history_db.table(self.name, cache_size=50)
+        self.admins = set(self.admins)
+        self.all_users = set(self.all_users)
+
+    def disconnect(self,username):
+        del self.online_users[username]
+    
+    def connect(self, user: User):
+        self.online_users[user.username] = user
+        self.all_users.add(user.username)
+        roommeta_db.upsert({"all_users": list(self.all_users)},where("name")==self.name)
+
+    def sendMessage(self, message):
+        for member in self.online_users.values():
+            member.send(message)
+
+def generate_request(method: str, *, header: dict = {}, data: str|dict = {}) -> str:
+    h = ""
+    header["Content-Type"] = ("string" if isinstance(data, str) else "json")
+    for key, value in header.items():
+        h += f"{key}: {value}\n"
+    d = (data if isinstance(data, str) else json.dumps(data, indent=4))
+    return f"{method.upper()}\n\n{h}\n{d}"
+
+def process_request(incoming: str) -> tuple[str, dict, str|dict]:
+    method, header, *body = incoming.split("\n\n")
+    header = {line.split(": ")[0]:(int(k) if (k := line.split(": ")[1]).isdigit() else k) for line in header.split("\n")}
+    body = "\n\n".join(body)
+    if header["Content-Type"] == "json": body = json.loads(body)
+    return method, header, body
+
+def get(user: User, header: dict = {}, data: dict|str = {}):
+    if isinstance(data, str):
+        data = data.split()
+        if data[0] == "self":
+            if data[1] == "room":
+                if data[2] == "name":
+                    return generate_request("POST_TO_USER", data=user.room)
+
+def pyconChat(user: User):
+    available_methods = {
+        "GET": get
+    }
     while True:
-        msg = client.recv(1024).decode("utf-8")
-        if msg == "/viewRequests":
-            client.send(b"/viewRequests")
-            client.recv(1024).decode("utf-8")
-            if username == groups[groupname].admin:
-                client.send(b"/sendingData")
-                client.recv(1024)
-                client.send(pickle.dumps(groups[groupname].joinRequests))
-            else:
-                client.send(b"You're not an admin.")
-        elif msg == "/approveRequest":
-            client.send(b"/approveRequest")
-            client.recv(1024).decode("utf-8")
-            if username == groups[groupname].admin:
-                client.send(b"/proceed")
-                usernameToApprove = client.recv(1024).decode("utf-8")
-                if usernameToApprove in groups[groupname].joinRequests:
-                    groups[groupname].joinRequests.remove(usernameToApprove)
-                    groups[groupname].allMembers.add(usernameToApprove)
-                    if usernameToApprove in groups[groupname].waitClients:
-                        groups[groupname].waitClients[usernameToApprove].send(b"/accepted")
-                        groups[groupname].connect(usernameToApprove,groups[groupname].waitClients[usernameToApprove])
-                        del groups[groupname].waitClients[usernameToApprove]
-                    print("Member Approved:",usernameToApprove,"| Group:",groupname)
-                    client.send(b"User has been added to the group.")
-                else:
-                    client.send(b"The user has not requested to join.")
-            else:
-                client.send(b"You're not an admin.")
-        elif msg == "/disconnect":
-            client.send(b"/disconnect")
-            client.recv(1024).decode("utf-8")
-            groups[groupname].disconnect(username)
-            print("User Disconnected:",username,"| Group:",groupname)
-            break
-        elif msg == "/messageSend":
-            client.send(b"/messageSend")
-            message = client.recv(1024).decode("utf-8")
-            groups[groupname].sendMessage(message,username)
-        elif msg == "/waitDisconnect":
-            client.send(b"/waitDisconnect")
-            del groups[groupname].waitClients[username]
-            print("Waiting Client:",username,"Disconnected")
-            break
-        elif msg == "/allMembers":
-            client.send(b"/allMembers")
-            client.recv(1024).decode("utf-8")
-            client.send(pickle.dumps(groups[groupname].allMembers))
-        elif msg == "/onlineMembers":
-            client.send(b"/onlineMembers")
-            client.recv(1024).decode("utf-8")
-            client.send(pickle.dumps(groups[groupname].onlineMembers))
-        elif msg == "/changeAdmin":
-            client.send(b"/changeAdmin")
-            client.recv(1024).decode("utf-8")
-            if username == groups[groupname].admin:
-                client.send(b"/proceed")
-                newAdminUsername = client.recv(1024).decode("utf-8")
-                if newAdminUsername in groups[groupname].allMembers:
-                    groups[groupname].admin = newAdminUsername
-                    print("New Admin:",newAdminUsername,"| Group:",groupname)
-                    client.send(b"Your adminship is now transferred to the specified user.")
-                else:
-                    client.send(b"The user is not a member of this group.")
-            else:
-                client.send(b"You're not an admin.")
-        elif msg == "/whoAdmin":
-            client.send(b"/whoAdmin")
-            groupname = client.recv(1024).decode("utf-8")
-            client.send(bytes("Admin: "+groups[groupname].admin,"utf-8"))
-        elif msg == "/kickMember":
-            client.send(b"/kickMember")
-            client.recv(1024).decode("utf-8")
-            if username == groups[groupname].admin:
-                client.send(b"/proceed")
-                usernameToKick = client.recv(1024).decode("utf-8")
-                if usernameToKick in groups[groupname].allMembers:
-                    groups[groupname].allMembers.remove(usernameToKick)
-                    if usernameToKick in groups[groupname].onlineMembers:
-                        groups[groupname].clients[usernameToKick].send(b"/kicked")
-                        groups[groupname].onlineMembers.remove(usernameToKick)
-                        del groups[groupname].clients[usernameToKick]
-                    print("User Removed:",usernameToKick,"| Group:",groupname)
-                    client.send(b"The specified user is removed from the group.")
-                else:
-                    client.send(b"The user is not a member of this group.")
-            else:
-                client.send(b"You're not an admin.")
-        elif msg == "/fileTransfer":
-            client.send(b"/fileTransfer")
-            filename = client.recv(1024).decode("utf-8")
-            if filename == "~error~":
-                continue
-            client.send(b"/sendFile")
-            remaining = int.from_bytes(client.recv(4),'big')
-            f = open(filename,"wb")
-            while remaining:
-                data = client.recv(min(remaining,4096))
-                remaining -= len(data)
-                f.write(data)
-            f.close()
-            print("File received:",filename,"| User:",username,"| Group:",groupname)
-            for member in groups[groupname].onlineMembers:
-                if member != username:
-                    memberClient = groups[groupname].clients[member]
-                    memberClient.send(b"/receiveFile")
-                    with fileTransferCondition:
-                        fileTransferCondition.wait()
-                    memberClient.send(bytes(filename,"utf-8"))
-                    with fileTransferCondition:
-                        fileTransferCondition.wait()
-                    with open(filename,'rb') as f:
-                        data = f.read()
-                        dataLen = len(data)
-                        memberClient.send(dataLen.to_bytes(4,'big'))
-                        memberClient.send(data)
-            client.send(bytes(filename+" successfully sent to all online group members.","utf-8"))
-            print("File sent",filename,"| Group: ",groupname)
-            os.remove(filename)
-        elif msg == "/sendFilename" or msg == "/sendFile":
-            with fileTransferCondition:
-                fileTransferCondition.notify()
-        else:
-            print("UNIDENTIFIED COMMAND:",msg)
+        method, header, body = process_request(user.recieve())
+        response = available_methods[method](user, header, body)
+        print(response)
+        user.send(response)
+        
 
 def handshake(client: socket):
     
@@ -236,7 +157,9 @@ def handshake(client: socket):
     TOKEN = private_key.decrypt(b64decode(CIPHER)).decode()
     key, username = TOKEN.split("@")
     if username != USERNAME: client.close()
-    user = get_user(username)
+    x = api_db.search(where("username") == username)
+    if len(x) > 1 or len(x) == 0: client.close()
+    user = x[0]
     key = user["salt"] + key + PEPPER + "@" + username
     if not hashlib.sha3_512(key.encode()).hexdigest() == user["hash"]:
         client.close()
@@ -255,39 +178,41 @@ def handshake(client: socket):
     
     # Handshake was successful, begin normal operations.
 
-    groupname = aes.decrypt(client.recv(1024))
-
-    if groupname in groups:
-        if username in groups[groupname].allMembers:
-            groups[groupname].connect(username,client)
-            client.send(b"/ready")
-            print("User Connected:",username,"| Group:",groupname)
-        else:
-            groups[groupname].joinRequests.add(username)
-            groups[groupname].waitClients[username] = client
-            groups[groupname].sendMessage(username+" has requested to join the group.","PyconChat")
-            client.send(b"/wait")
-            print("Join Request:",username,"| Group:",groupname)
-        threading.Thread(target=pyconChat, args=(client, username, groupname,)).start()
-    else:
-        groups[groupname] = Group(username,client)
-        threading.Thread(target=pyconChat, args=(client, username, groupname,)).start()
-        client.send(b"/adminReady")
-        print("New Group:",groupname,"| Admin:",username)
+    user = User(username, aes, client)
+    global rooms
+    rooms[DEFAULT_ROOM_NAME].connect(user)
+    users_db.upsert({"username": username, "logged-in": True}, where("username") == username)
+    threading.Thread(target=pyconChat, daemon=True, args=(user,)).start()
 
 def main():
-    # if len(sys.argv) < 3:
-    #     print("USAGE: python server.py <IP> <Port>")
-    #     print("EXAMPLE: python server.py localhost 8000")
-    #     return
     listenSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listenSocket.bind(("127.0.0.1", 8000))
     listenSocket.listen(10)
-    print("PyconChat Server running")
-    while True:
-        client, _ = listenSocket.accept()
-        print(f"Accepting connection")
-        threading.Thread(target=handshake, args=(client,)).start()
+    global rooms
+    rooms = {room_meta["name"]: Room(*room_meta.values())
+            for room_meta in roommeta_db.all()}
+    print("PyconChat Server running")  
+    try:
+        while True:
+            try:
+                listenSocket.settimeout(1.0)  # Set a timeout for the accept call
+                client, _ = listenSocket.accept()
+                print("Accepting connection")
+                threading.Thread(target=handshake, args=(client,)).start()
+            except socket.timeout:
+                continue  # Ignore timeout and continue the loop
+    except KeyboardInterrupt:
+        print("Shutting down server...")
+    finally:
+        listenSocket.close()
+        for v in rooms.values():
+            for user in v.online_users:
+                users_db.update({"logged-in": False}, where("username") == user.username)
+                user.send("Server closed.")
+                user.client.close()
+        
+        print("Server stopped.")
+        
 
 if __name__ == "__main__":
     main()
