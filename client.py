@@ -9,6 +9,7 @@ from Crypto import Random
 from base64 import b64encode, b64decode
 from dataclasses import dataclass, field
 from time import gmtime, strftime
+import blessed
 
 HANDSHAKE_CONFIRM = [
     "Rammstein - Du Riechst So Gut",
