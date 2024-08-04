@@ -8,6 +8,7 @@ from Crypto.Cipher import PKCS1_OAEP, AES
 from Crypto import Random
 from base64 import b64encode, b64decode
 from dataclasses import dataclass, field
+from time import gmtime, strftime
 
 HANDSHAKE_CONFIRM = [
     "Rammstein - Du Riechst So Gut",
@@ -53,21 +54,68 @@ class State:
     
     def send(self, raw: str | bytes) -> None:
         """ Send data to the user """
-        self.client.send(self.aes.encrypt(raw))
+        if self.alive: self.client.send(self.aes.encrypt(raw))
         
     def recieve(self, size: int = 1024) -> str:
-        """ Receive data from the user """
-        return self.aes.decrypt(self.client.recv(size))
+        """ Recieve data from the user """
+        if self.alive: return self.aes.decrypt(self.client.recv(size))
+    
+state: State    
+def disconnect():
+    state.send(generate_packet("DISCONNECT", data={"user": "__self__"}))
+    # state.client.shutdown(socket.SHUT_RDWR)
+    state.alive = False
+    
+def post_room(header = {}, payload: str = None):
+    global state
+    state.room = payload
+    print(f"Joined to {state.room}")
+    
+def goodbye(header = {}, payload = {}):
+    print(f"Goodbye, {state.username}!")
+    
+def chat_event(header = {}, payload: str = None):
+    print(payload)
+    
+def ok200(header = {}, payload: str = None):
+    pass
+    
+def serverListen():
+    available_methods = {
+        "POST_ROOM": post_room,
+        "GOODBYE": goodbye,
+        "CHAT_EVENT": chat_event,
+        "200": ok200
+    }
+    global state
+    while state.alive:
+        method, header, payload = process_packet(state.recieve())
+        available_methods[method](header, payload)
+    
+def post_msg(msg):
+    x = generate_packet("POST_MSG", header={"username": state.username, "time": strftime("%Y-%m-%d %H:%M:%S", gmtime())}, data=msg)
+    state.send(x)
+    
+def command(msg):
+    print("Nigga :)")    
 
-def serverListen(serverSocket):
-    while state["alive"]:
-        msg = serverSocket.recv(1024).decode("utf-8")
-        
-def userInput(serverSocket):
-    while state["alive"]:
-        ...
+def userInput():
+    available_commands = {
+        "command": None,
+        "_default": post_msg
+    }
+    global state
+    while state.alive:
+        try:
+            msg = input(f"{state.username} > ")  # Dummy placeholder for actual user input
+            if msg and msg[0] == "/": command(msg)
+            else: post_msg(msg)
+        except EOFError:
+            break
+        if msg.strip().lower() == "exit": break
+    disconnect()
 
-def generate_request(method: str, *, header: dict = {}, data: str|dict = {}) -> str:
+def generate_packet(method: str, *, header: dict = {}, data: str|dict = {}) -> str:
     h = ""
     header["Content-Type"] = ("string" if isinstance(data, str) else "json")
     for key, value in header.items():
@@ -75,14 +123,13 @@ def generate_request(method: str, *, header: dict = {}, data: str|dict = {}) -> 
     d = (data if isinstance(data, str) else json.dumps(data, indent=4))
     return f"{method.upper()}\n\n{h}\n{d}"
 
-def process_request(incoming: str) -> tuple[str, dict, str|dict]:
+def process_packet(incoming: str) -> tuple[str, dict, str|dict]:
     method, header, *body = incoming.split("\n\n")
     header = {line.split(": ")[0]:(int(k) if (k := line.split(": ")[1]).isdigit() else k) for line in header.split("\n")}
     body = "\n\n".join(body)
     if header["Content-Type"] == "json": body = json.loads(body)
     return method, header, body
 
-state: State
 def main():
     # if len(sys.argv) < 3:
     #     print("USAGE: python client.py <IP> <Port>")
@@ -129,30 +176,14 @@ def main():
     # Authentication and handshake was successful, begin normal operations.
     
     global state
-    state = State(USERNAME, aes, serverSocket, False)
+    state = State(USERNAME, aes, serverSocket, True)
     
-    state.send(generate_request("GET", data="self room name"))
-    response = process_request(state.recieve())
+    state.send(generate_packet("GET", data={"user": "__self__", "class": "room", "type": "name"}))
     
-    print(response)
-    
-    
-    
-    
-    input("ENTER to exit")
-    
-    exit()
-    
-    # state["inputCondition"] = threading.Condition()
-    # state["sendMessageLock"] = threading.Lock()
-    
-    state["groupname"] = input("Please enter the name of the group: ")
- 
-    userInputThread = threading.Thread(target=userInput,args=(serverSocket,))
-    serverListenThread = threading.Thread(target=serverListen,args=(serverSocket,))
+    userInputThread = threading.Thread(target=userInput)
+    serverListenThread = threading.Thread(target=serverListen)
     userInputThread.start()
     serverListenThread.start()
-
 
 if __name__ == "__main__":
     main()

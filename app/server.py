@@ -79,14 +79,15 @@ class User:
     aes: AESCipher
     client: socket
     room: str = DEFAULT_ROOM_NAME
+    alive: bool = False
     
     def send(self, raw: str | bytes) -> None:
         """ Send data to the user """
-        self.client.send(self.aes.encrypt(raw))
+        if self.alive: self.client.send(self.aes.encrypt(raw))
         
     def recieve(self, size: int = 1024) -> str:
         """ Receive data from the user """
-        return self.aes.decrypt(self.client.recv(size))
+        if self.alive: return self.aes.decrypt(self.client.recv(size))
 
 @dataclass
 class Room:
@@ -104,49 +105,86 @@ class Room:
 
     def disconnect(self,username):
         del self.online_users[username]
+        users_db.update({"logged-in": False}, where("username") == username)
     
     def connect(self, user: User):
         self.online_users[user.username] = user
         self.all_users.add(user.username)
         roommeta_db.upsert({"all_users": list(self.all_users)},where("name")==self.name)
 
-    def sendMessage(self, message):
+    def sendMessage(self, meta, msg):
+        # print(meta, msg)
+        # a = {"time": meta['time'], "user": meta['username'], "message": {msg}}
+        # print(type(a))
+        # self.history.insert(a)
+        message = f"[{meta['time']}]-({meta['username']})-> {msg}"
+        packet = generate_packet("CHAT_EVENT", payload=message)
         for member in self.online_users.values():
-            member.send(message)
+            print(f"Sending {message} to {member.username}")
+            member.send(packet)
 
-def generate_request(method: str, *, header: dict = {}, data: str|dict = {}) -> str:
+def generate_packet(method: str, *, header: dict = {}, payload: str|dict = {}) -> str:
     h = ""
-    header["Content-Type"] = ("string" if isinstance(data, str) else "json")
+    header["Content-Type"] = ("string" if isinstance(payload, str) else "json")
     for key, value in header.items():
         h += f"{key}: {value}\n"
-    d = (data if isinstance(data, str) else json.dumps(data, indent=4))
+    d = (payload if isinstance(payload, str) else json.dumps(payload, indent=4))
     return f"{method.upper()}\n\n{h}\n{d}"
 
-def process_request(incoming: str) -> tuple[str, dict, str|dict]:
+def process_packet(incoming: str) -> tuple[str, dict, str|dict]:
     method, header, *body = incoming.split("\n\n")
     header = {line.split(": ")[0]:(int(k) if (k := line.split(": ")[1]).isdigit() else k) for line in header.split("\n")}
     body = "\n\n".join(body)
     if header["Content-Type"] == "json": body = json.loads(body)
     return method, header, body
 
-def get(user: User, header: dict = {}, data: dict|str = {}):
-    if isinstance(data, str):
-        data = data.split()
-        if data[0] == "self":
-            if data[1] == "room":
-                if data[2] == "name":
-                    return generate_request("POST_TO_USER", data=user.room)
+def ok200():
+    return generate_packet("200")
+
+def invalid_request(user: User, header: dict = {}, payload: dict|str = {}, method: str = None):
+    if method: return generate_packet("INVALID_REQUEST", payload={"header": header, "payload": payload, "method": method})
+    return generate_packet("INVALID_REQUEST", payload={"header": header, "payload": payload})
+
+def disconnect_user(user: User, header: dict = {}, payload: dict|str = {}):
+    if payload["user"] == "__self__":
+        user.send(generate_packet("GOODBYE"))
+        user.alive = False
+        rooms[user.room].disconnect(user.username)
+    print(f"{user.username} disconnected.")
+
+def get(user: User, header: dict = {}, payload: dict|str = {}):
+    match payload:
+        case {"user": "__self__", "class": "room", "type": "name"}:
+            return generate_packet("POST_ROOM", payload=user.room)
+        case _:
+            return invalid_request(user, header, payload, "GET")
+        
+def post_msg(user: User, header: dict = {}, payload: str = None):
+    if user.username != header['username'] or not isinstance(payload, str): 
+        return invalid_request(user, header, payload, "POST_MSG")
+    rooms[user.room].sendMessage(header, payload)
+    return ok200()
 
 def pyconChat(user: User):
     available_methods = {
-        "GET": get
+        "GET": get,
+        "DISCONNECT": disconnect_user,
+        "POST_MSG": post_msg,
+        "_default": invalid_request
     }
-    while True:
-        method, header, body = process_request(user.recieve())
-        response = available_methods[method](user, header, body)
+    while user.alive:
+        method, header, payload = process_packet(user.recieve())
+        response = available_methods.get(method, available_methods["_default"])(user, header, payload)
+        
+        # if method in available_methods.keys():
+            
+            
+        #     response = available_methods[method](user, header, payload)
+        # else:
+        #     response = invalid_request(user, header, payload, method)
         print(response)
         user.send(response)
-        
+    print(f"Terminating {user.username} thread")
 
 def handshake(client: socket):
     
@@ -176,9 +214,15 @@ def handshake(client: socket):
     client.send(aes.encrypt("200"))
     print("Successful handshake!")
     
-    # Handshake was successful, begin normal operations.
+    # AES Handshake was successful, 
 
-    user = User(username, aes, client)
+
+
+
+
+    # begin normal operations.
+    
+    user = User(username, aes, client, alive=True)
     global rooms
     rooms[DEFAULT_ROOM_NAME].connect(user)
     users_db.upsert({"username": username, "logged-in": True}, where("username") == username)
@@ -206,10 +250,10 @@ def main():
     finally:
         listenSocket.close()
         for v in rooms.values():
-            for user in v.online_users:
-                users_db.update({"logged-in": False}, where("username") == user.username)
-                user.send("Server closed.")
-                user.client.close()
+            for online_username, online_user in v.online_users.items():
+                users_db.update({"logged-in": False}, where("username") == online_username)
+                online_user.send("Server closed.")
+                online_user.client.close()
         
         print("Server stopped.")
         
