@@ -239,14 +239,17 @@ def main():
     plain_text = key + password + "@" + username
     
     server_public_key = PKCS1_OAEP.new(RSA.importKey(PRIVATE_KEY.decrypt(cipher)))
-    cipher = server_public_key.encrypt(plain_text.encode())      
+    cipher = server_public_key.encrypt(plain_text.encode())
+    ip = requests.request("GET", f"{URL}?dynip", headers={"Authorization": f"{USERNAME} {b64encode(cipher).decode()}"}, data={}).text  
         
     serverSocket = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-    serverSocket.connect(("127.0.0.1", 8000))
+    serverSocket.connect((ip, 8000))
     serverSocket.settimeout(1)
      
     # handshake
     
+    server_public_key = PKCS1_OAEP.new(RSA.importKey(PRIVATE_KEY.decrypt(cipher)))
+    cipher = server_public_key.encrypt(plain_text.encode())    
     serverSocket.send(f"{USERNAME} {b64encode(cipher).decode()}".encode()) # authenticating client
     cipher = serverSocket.recv(1024) # user.privatekey rsa encrypted aes handshake
     aes_key = PRIVATE_KEY.decrypt(b64decode(cipher)) # aes-key

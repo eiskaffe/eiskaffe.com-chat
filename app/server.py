@@ -123,11 +123,6 @@ class Room:
         roommeta_db.upsert({"all_users": list(self.all_users)},where("name")==self.name)
 
     def send_message(self, meta, msg):
-        # print(meta, msg)
-        # a = {"time": meta['time'], "user": meta['username'], "message": {msg}}
-        # print(type(a))
-        # self.history.insert(a)
-        # message = f"[{meta['time']}]-({meta['username']})-> {msg}"
         packet = generate_packet("CHAT_EVENT", header={"time": meta["time"], "username": meta["username"]}, payload=msg)
         for member in self.online_users.values():
             print(f"Sending \"{msg}\" to {member.username}")
