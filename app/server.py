@@ -116,14 +116,19 @@ class Room:
     def disconnect(self,username):
         del self.online_users[username]
         users_db.update({"logged-in": False}, where("username") == username)
+        self.send_message("", f"{username} logged out.")
     
     def connect(self, user: User):
         self.online_users[user.username] = user
         self.all_users.add(user.username)
         roommeta_db.upsert({"all_users": list(self.all_users)},where("name")==self.name)
+        self.send_message("", f"{user.username} logged in.")
 
     def send_message(self, meta, msg):
-        packet = generate_packet("CHAT_EVENT", header={"time": meta["time"], "username": meta["username"]}, payload=msg)
+        if isinstance(meta, dict):
+            packet = generate_packet("CHAT_EVENT", header={"time": meta["time"], "username": meta["username"]}, payload=msg)
+        else:
+            packet = generate_packet("CHAT_EVENT", payload=msg)
         for member in self.online_users.values():
             print(f"Sending \"{msg}\" to {member.username}")
             member.send(packet)

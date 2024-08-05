@@ -105,9 +105,7 @@ class State:
         self.terminal_lines.append({"head": head, "body": string})
         self.print_screen()
 
-   
-state: State     
-       
+state: State      
 def disconnect():
     state.send(generate_packet("DISCONNECT", data={"user": "__self__"}))
     state.alive = False
@@ -121,8 +119,11 @@ def post_room(header = {}, payload: str = None):
 def goodbye(header = {}, payload = {}):
     print(f"Goodbye, {state.username}!")
     
-def chat_event(header = {}, payload: str = None):
-    state.add_to_screen(payload, f"[{header['time']}]-({header['username']})-> ")
+def chat_event(header: dict = {}, payload: str = None):
+    if header.get("time", False) and header.get("username", False):
+        state.add_to_screen(payload, f"[{header['time']}]-({header['username']})-> ")
+    else:
+        state.add_to_screen(payload)
     
 def ok200(header = {}, payload: str = None):
     pass
@@ -240,10 +241,10 @@ def main():
     
     server_public_key = PKCS1_OAEP.new(RSA.importKey(PRIVATE_KEY.decrypt(cipher)))
     cipher = server_public_key.encrypt(plain_text.encode())
-    ip = requests.request("GET", f"{URL}?dynip", headers={"Authorization": f"{USERNAME} {b64encode(cipher).decode()}"}, data={}).text  
-        
+    ip_cipher = requests.request("GET", f"{URL}?dynip", headers={"Authorization": f"{USERNAME} {b64encode(cipher).decode()}"}, data={}).text  
+      
     serverSocket = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-    serverSocket.connect((ip, 8000))
+    serverSocket.connect((PRIVATE_KEY.decrypt(b64decode(ip_cipher)).decode() , 8000))
     serverSocket.settimeout(1)
      
     # handshake
