@@ -218,13 +218,7 @@ def handshake(client: socket):
     client.send(aes.encrypt("200"))
     print("Successful handshake!")
     
-    # AES Handshake was successful, 
-
-
-
-
-
-    # begin normal operations.
+    # AES Handshake was successful, begin normal operations.
     
     user = User(username, aes, client, alive=True)
     global rooms
@@ -234,7 +228,7 @@ def handshake(client: socket):
 
 def main():
     listenSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listenSocket.bind(("127.0.0.1", 8000))
+    listenSocket.bind(("0.0.0.0", 8000))
     listenSocket.listen(10)
     global rooms
     rooms = {room_meta["name"]: Room(*room_meta.values())
