@@ -248,7 +248,6 @@ def main():
      
     # handshake
     
-    server_public_key = PKCS1_OAEP.new(RSA.importKey(PRIVATE_KEY.decrypt(cipher)))
     cipher = server_public_key.encrypt(plain_text.encode())    
     serverSocket.send(f"{USERNAME} {b64encode(cipher).decode()}".encode()) # authenticating client
     cipher = serverSocket.recv(1024) # user.privatekey rsa encrypted aes handshake
