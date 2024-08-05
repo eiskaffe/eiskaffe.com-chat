@@ -122,15 +122,15 @@ class Room:
         self.all_users.add(user.username)
         roommeta_db.upsert({"all_users": list(self.all_users)},where("name")==self.name)
 
-    def sendMessage(self, meta, msg):
+    def send_message(self, meta, msg):
         # print(meta, msg)
         # a = {"time": meta['time'], "user": meta['username'], "message": {msg}}
         # print(type(a))
         # self.history.insert(a)
-        message = f"[{meta['time']}]-({meta['username']})-> {msg}"
-        packet = generate_packet("CHAT_EVENT", payload=message)
+        # message = f"[{meta['time']}]-({meta['username']})-> {msg}"
+        packet = generate_packet("CHAT_EVENT", header={"time": meta["time"], "username": meta["username"]}, payload=msg)
         for member in self.online_users.values():
-            print(f"Sending {message} to {member.username}")
+            print(f"Sending \"{msg}\" to {member.username}")
             member.send(packet)
 
 def generate_packet(method: str, *, header: dict = {}, payload: str|dict = {}) -> str:
@@ -173,7 +173,7 @@ def get(user: User, header: dict = {}, payload: dict|str = {}):
 def post_msg(user: User, header: dict = {}, payload: str = None):
     if user.username != header['username'] or not isinstance(payload, str): 
         return invalid_request(user, header, payload, "POST_MSG")
-    rooms[user.room].sendMessage(header, payload)
+    rooms[user.room].send_message(header, payload)
     return ok200()
 
 def pyconChat(user: User):

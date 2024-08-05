@@ -10,7 +10,7 @@ from Crypto import Random
 from base64 import b64encode, b64decode
 from dataclasses import dataclass, field
 from time import gmtime, strftime
-import blessed
+import blessed, curses
 import signal
 
 HANDSHAKE_CONFIRM = [
@@ -20,6 +20,7 @@ HANDSHAKE_CONFIRM = [
     "The Retrosic - Total War",
     "Stahlmann - Adrenalin"
 ]
+# MESSAGE_LIMIT = 10
 
 class AESCipher(object):
     
@@ -53,8 +54,13 @@ class State:
     client: socket
     term: blessed.Terminal
     
+    terminal_lines: list[dict[str,str]] = field(default_factory=list)
+    print_lock: threading.Lock = field(default_factory=threading.Lock)
+    message_offset: int = 0
+    pad: int = 0
+    msg: str = ""
     alive: bool = False
-    room: str = "None"
+    room: str = "None"        
     
     def send(self, raw: str | bytes) -> None:
         """ Send data to the user """
@@ -63,8 +69,45 @@ class State:
     def recieve(self, size: int = 1024) -> str:
         """ Recieve data from the user """
         if self.alive: return self.aes.decrypt(self.client.recv(size))
+        
+    @property
+    def max_messages_shown(self):
+        return self.term.height - 4 - self.pad
     
-state: State    
+    @staticmethod
+    def _process_message(msg_head, string):
+        if not len(f"{msg_head}{string}") // state.term.width > 0: return 0, f"{msg_head}{string}"
+        r = ""
+        k = 0
+        for i in range(0, len(string)-1, state.term.width-len(msg_head)):
+            if i == 0: 
+                r += msg_head + string[0:state.term.width-len(msg_head)]
+            else: 
+                r += "\n" + " "*len(msg_head) + string[i:i+state.term.width-len(msg_head)]
+                k += 1
+        return k, r       
+        
+    def print_screen(self):
+        p = 0
+        self.print_lock.acquire(True)
+        print(self.term.clear)
+        x = len(self.terminal_lines) - self.max_messages_shown - self.message_offset
+        if x < 0: x = 0
+        for i, d in enumerate(self.terminal_lines[x:len(self.terminal_lines)-self.message_offset]):
+            k, s = self._process_message(d["head"], d["body"])             
+            print(self.term.move_xy(0, i + 1 + p) + self.term.clear_eol + s)
+            p += k
+        self.pad, string = State._process_message(f"{self.username} > ", self.msg)
+        print(self.term.move_xy(0, self.term.height - 2 - self.pad) + self.term.clear_eos + string)
+        self.print_lock.release()
+        
+    def add_to_screen(self, string: str, head: str = ""):
+        self.terminal_lines.append({"head": head, "body": string})
+        self.print_screen()
+
+   
+state: State     
+       
 def disconnect():
     state.send(generate_packet("DISCONNECT", data={"user": "__self__"}))
     state.alive = False
@@ -73,17 +116,18 @@ def disconnect():
 def post_room(header = {}, payload: str = None):
     global state
     state.room = payload
-    print(f"Joined to {state.room}")
+    state.add_to_screen(f"Joined to {state.room}")
     
 def goodbye(header = {}, payload = {}):
     print(f"Goodbye, {state.username}!")
     
 def chat_event(header = {}, payload: str = None):
-    print(payload)
+    state.add_to_screen(payload, f"[{header['time']}]-({header['username']})-> ")
     
 def ok200(header = {}, payload: str = None):
     pass
     
+# MAIN BOSS
 def serverListen():
     available_methods = {
         "POST_ROOM": post_room,
@@ -104,25 +148,48 @@ def post_msg(msg):
     state.send(x)
     
 def command(msg):
-    print("gn :)")    
+    state.add_to_screen("gn :)")
 
+# MAIN BOSS
 def userInput():
     available_commands = {
         "command": None,
         "_default": post_msg
     }
     global state
-    while state.alive:
-        try:
-            msg = input(f"{state.username} > ")  # Dummy placeholder for actual user input
-            if msg.strip().lower() == "exit": disconnect()
-            elif msg and msg[0] == "/": command(msg)
-            else: post_msg(msg)
-        except EOFError:
-            state.alive = False
-    # print("userInput dead.")
+    with state.term.cbreak():
+        while state.alive:
+            try:
+                # msg = input(f"{state.username} > ")  # Dummy placeholder for actual user input
+                state.msg = ""
+                state.print_lock.acquire(True)
+                print(state.term.move_xy(0, state.term.height - 2) + state.term.clear_eos + f"{state.username} > ")
+                state.print_lock.release()
+                while True:
+                    inp = state.term.inkey()
+                    if inp.code == curses.KEY_ENTER:
+                        break
+                    elif inp.code == curses.KEY_BACKSPACE:
+                        state.msg = state.msg[:-1]
+                    elif inp.code in [curses.KEY_UP, curses.KEY_DOWN, curses.KEY_LEFT, curses.KEY_RIGHT]:
+                        pass
+                    else: 
+                        state.msg += inp
+                    new_pad, string = State._process_message(f"{state.username} > ", state.msg)
+                    if new_pad != state.pad: 
+                        state.print_screen()
+                        state.pad = new_pad
+                    state.print_lock.acquire(True)
+                    print(state.term.move_xy(0, state.term.height - 2 - state.pad) + state.term.clear_eos + string)
+                    state.print_lock.release()
+                if state.msg.strip().lower() == "exit": disconnect()
+                elif state.msg and state.msg[0] == "/": command(state.msg)
+                else: post_msg(state.msg)
+
+            except EOFError:
+                state.alive = False
+        # print("userInput dead.")
     return 1
-    
 
 def generate_packet(method: str, *, header: dict = {}, data: str|dict = {}) -> str:
     h = ""
@@ -193,7 +260,7 @@ def main():
     # Authentication and handshake was successful, begin normal operations.
     
     global state
-    state = State(USERNAME, aes, serverSocket, blessed.Terminal(), True)
+    state = State(USERNAME, aes, serverSocket, blessed.Terminal(), alive=True)
     
     state.send(generate_packet("GET", data={"user": "__self__", "class": "room", "type": "name"}))
     
