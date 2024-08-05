@@ -1,6 +1,7 @@
 import socket
 import threading
 import json
+import blessed.terminal
 import requests
 import hashlib
 from Crypto.PublicKey import RSA
@@ -10,6 +11,7 @@ from base64 import b64encode, b64decode
 from dataclasses import dataclass, field
 from time import gmtime, strftime
 import blessed
+import signal
 
 HANDSHAKE_CONFIRM = [
     "Rammstein - Du Riechst So Gut",
@@ -49,6 +51,7 @@ class State:
     username: str
     aes: AESCipher
     client: socket
+    term: blessed.Terminal
     
     alive: bool = False
     room: str = "None"
@@ -64,8 +67,8 @@ class State:
 state: State    
 def disconnect():
     state.send(generate_packet("DISCONNECT", data={"user": "__self__"}))
-    # state.client.shutdown(socket.SHUT_RDWR)
     state.alive = False
+    print(state.term.exit_fullscreen)
     
 def post_room(header = {}, payload: str = None):
     global state
@@ -90,15 +93,18 @@ def serverListen():
     }
     global state
     while state.alive:
-        method, header, payload = process_packet(state.recieve())
+        try: method, header, payload = process_packet(state.recieve())
+        except socket.timeout: continue
         available_methods[method](header, payload)
+    # print("serverListen dead.")
+    return 1
     
 def post_msg(msg):
     x = generate_packet("POST_MSG", header={"username": state.username, "time": strftime("%Y-%m-%d %H:%M:%S", gmtime())}, data=msg)
     state.send(x)
     
 def command(msg):
-    print("Nigga :)")    
+    print("gn :)")    
 
 def userInput():
     available_commands = {
@@ -109,12 +115,14 @@ def userInput():
     while state.alive:
         try:
             msg = input(f"{state.username} > ")  # Dummy placeholder for actual user input
-            if msg and msg[0] == "/": command(msg)
+            if msg.strip().lower() == "exit": disconnect()
+            elif msg and msg[0] == "/": command(msg)
             else: post_msg(msg)
         except EOFError:
-            break
-        if msg.strip().lower() == "exit": break
-    disconnect()
+            state.alive = False
+    # print("userInput dead.")
+    return 1
+    
 
 def generate_packet(method: str, *, header: dict = {}, data: str|dict = {}) -> str:
     h = ""
@@ -132,11 +140,18 @@ def process_packet(incoming: str) -> tuple[str, dict, str|dict]:
     return method, header, body
 
 def main():
-    # if len(sys.argv) < 3:
-    #     print("USAGE: python client.py <IP> <Port>")
-    #     print("EXAMPLE: python client.py localhost 8000")
-    #     return
-    
+    # Set up signal handler to handle Ctrl-C
+    def signal_handler(sig, frame):
+        print(state.term.exit_fullscreen)
+        print("\nForcefully shutting down...")
+        disconnect()
+        userInputThread.join(1.2)
+        serverListenThread.join(1.2)
+        # print(userInputThread.is_alive(), serverListenThread.is_alive())
+        state.client.close()
+        
+    signal.signal(signal.SIGINT, signal_handler)
+
     # Authentication
     
     URL = r"http://127.0.0.1:5000/api"    
@@ -161,6 +176,7 @@ def main():
         
     serverSocket = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
     serverSocket.connect(("127.0.0.1", 8000))
+    serverSocket.settimeout(1)
      
     # handshake
     
@@ -177,7 +193,7 @@ def main():
     # Authentication and handshake was successful, begin normal operations.
     
     global state
-    state = State(USERNAME, aes, serverSocket, True)
+    state = State(USERNAME, aes, serverSocket, blessed.Terminal(), True)
     
     state.send(generate_packet("GET", data={"user": "__self__", "class": "room", "type": "name"}))
     
@@ -185,6 +201,8 @@ def main():
     serverListenThread = threading.Thread(target=serverListen)
     userInputThread.start()
     serverListenThread.start()
-
+    
+    print(state.term.enter_fullscreen + state.term.home)
+    
 if __name__ == "__main__":
     main()

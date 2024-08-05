@@ -55,12 +55,14 @@ class AESCipher(object):
         self.key = hashlib.sha3_256(key).digest()
 
     def encrypt(self, raw):
+        if not raw: return
         raw = self._pad(raw)
         iv = Random.new().read(AES.block_size)
         cipher = AES.new(self.key, AES.MODE_GCM, iv)
         return b64encode(iv + cipher.encrypt(raw.encode()))
 
     def decrypt(self, enc):
+        if not enc: return
         enc = b64decode(enc)
         iv = enc[:AES.block_size]
         cipher = AES.new(self.key, AES.MODE_GCM, iv)
@@ -83,11 +85,19 @@ class User:
     
     def send(self, raw: str | bytes) -> None:
         """ Send data to the user """
-        if self.alive: self.client.send(self.aes.encrypt(raw))
+        try:
+            if self.alive: self.client.send(self.aes.encrypt(raw))
+        except (ConnectionResetError , ConnectionAbortedError): 
+            disconnect_user(self, payload={"user": "__self__"}, send_response=False)
+            return
         
     def recieve(self, size: int = 1024) -> str:
         """ Receive data from the user """
-        if self.alive: return self.aes.decrypt(self.client.recv(size))
+        try: 
+            if self.alive: return self.aes.decrypt(self.client.recv(size))
+        except (ConnectionResetError , ConnectionAbortedError , ValueError): 
+            disconnect_user(self, payload={"user": "__self__"}, send_response=False)
+            return
 
 @dataclass
 class Room:
@@ -131,7 +141,8 @@ def generate_packet(method: str, *, header: dict = {}, payload: str|dict = {}) -
     d = (payload if isinstance(payload, str) else json.dumps(payload, indent=4))
     return f"{method.upper()}\n\n{h}\n{d}"
 
-def process_packet(incoming: str) -> tuple[str, dict, str|dict]:
+def process_packet(incoming: str | None) -> tuple[str, dict, str|dict]:
+    if not isinstance(incoming, str): return "", {}, {}
     method, header, *body = incoming.split("\n\n")
     header = {line.split(": ")[0]:(int(k) if (k := line.split(": ")[1]).isdigit() else k) for line in header.split("\n")}
     body = "\n\n".join(body)
@@ -145,9 +156,9 @@ def invalid_request(user: User, header: dict = {}, payload: dict|str = {}, metho
     if method: return generate_packet("INVALID_REQUEST", payload={"header": header, "payload": payload, "method": method})
     return generate_packet("INVALID_REQUEST", payload={"header": header, "payload": payload})
 
-def disconnect_user(user: User, header: dict = {}, payload: dict|str = {}):
+def disconnect_user(user: User, header: dict = {}, payload: dict|str = {}, *, send_response: bool = True):
     if payload["user"] == "__self__":
-        user.send(generate_packet("GOODBYE"))
+        if send_response: user.send(generate_packet("GOODBYE"))
         user.alive = False
         rooms[user.room].disconnect(user.username)
     print(f"{user.username} disconnected.")
@@ -175,14 +186,7 @@ def pyconChat(user: User):
     while user.alive:
         method, header, payload = process_packet(user.recieve())
         response = available_methods.get(method, available_methods["_default"])(user, header, payload)
-        
-        # if method in available_methods.keys():
-            
-            
-        #     response = available_methods[method](user, header, payload)
-        # else:
-        #     response = invalid_request(user, header, payload, method)
-        print(response)
+        # print(response)
         user.send(response)
     print(f"Terminating {user.username} thread")
 
