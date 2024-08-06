@@ -174,7 +174,7 @@ def post_msg(user: User, header: dict = {}, payload: str = None):
     if user.username != header['username'] or not isinstance(payload, str): 
         return invalid_request(user, header, payload, "POST_MSG")
     rooms[user.room].send_message(header, payload)
-    return ok200()
+    return
 
 def pyconChat(user: User):
     available_methods = {
@@ -186,8 +186,7 @@ def pyconChat(user: User):
     while user.alive:
         method, header, payload = process_packet(user.recieve())
         response = available_methods.get(method, available_methods["_default"])(user, header, payload)
-        # print(response)
-        user.send(response)
+        if response != None: user.send(response)
     print(f"Terminating {user.username} thread")
 
 def handshake(client: socket):
